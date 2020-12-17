@@ -1,24 +1,46 @@
-# combine Mybatis logs to elk
+package com.demo.interceptor;
 
-mybatis打出的日志是这样的：
-```
-2018-05-18 17:17:09,870|DEBUG|c.i.c.d.m.B.listByKeys|debug|dao|[http-nio-8090-exec-3]|xlk|icu|127.0.0.1|133455757jhbr2ty5|75007|==>  Preparing: SELECT * FROM department WHERE id IN ( ? ) 
-2018-05-18 17:17:09,871|DEBUG|c.i.c.d.m.B.listByKeys|debug|dao|[http-nio-8090-exec-3]|xlk|icu|127.0.0.1|133455757jhbr2ty5|75007|==> Parameters: 3647(Integer)
-2018-05-18 17:17:09,875|DEBUG|c.i.c.d.m.B.listByKeys|debug|dao|[http-nio-8090-exec-3]|xlk|icu|127.0.0.1|133455757jhbr2ty5|75007|<==      Total: 1
-```
-但是这3条日志是有3行记录，想要将3行记录合并为1条推送到ELK十分困难。这篇[文章](https://blog.csdn.net/hfismyangel/article/details/80367528)有对原理进行分析，虽然十分困难，但这里还是找到了解决方案。
+import com.demo.logger.SqlLogger;
+import com.demo.logger.SqlParamLogger;
+import com.demo.serivce.ISqlLogService;
+import org.apache.ibatis.executor.statement.StatementHandler;
+import org.apache.ibatis.plugin.Interceptor;
+import org.apache.ibatis.plugin.Intercepts;
+import org.apache.ibatis.plugin.Invocation;
+import org.apache.ibatis.plugin.Signature;
+import org.apache.ibatis.session.ResultHandler;
+import org.springframework.beans.factory.annotation.Autowired;
 
-1. 编写拦截器`SqlLogInterceptor`，对`StatementHandler`的`preapre`方法进行拦截
-该方法的原型，其中`Connection`是`ConnectionLogger`对象，`Statement`是`PreparedStatementLogger`对象
-```
-Statement prepare(Connection connection, Integer transactionTimeout)
-      throws SQLException;
-```
-如果将准备Statement的过程，换成自定义的logger，就可以将将日志收集起来
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.Statement;
+import java.util.List;
 
-核心代码
-```
- @Override
+/**
+ * 记录慢SQL日志，替代原有的SqlLogInterceptor
+ * 日志记录规则由LogService负责
+ */
+@Intercepts(value = {
+        @Signature(type = StatementHandler.class, method = "prepare", args = {Connection.class, Integer.class}),
+        @Signature(type = StatementHandler.class, method = "query", args = {Statement.class, ResultHandler.class}),
+        @Signature(type = StatementHandler.class, method = "update", args = {Statement.class}),
+        @Signature(type = StatementHandler.class, method = "batch", args = {Statement.class})
+})
+public class SqlLogInterceptor implements Interceptor {
+
+    @Autowired
+    private ISqlLogService logService;
+
+    /**
+     * 拦截目标对象
+     *
+     * @param invocation
+     * @return
+     * @throws Throwable
+     */
+    @Override
     public Object intercept(Invocation invocation) throws Throwable {
         String methodName = invocation.getMethod().getName();
         //在prepare方法中，将结果Statement包裹为SqlLogger的代理
@@ -49,12 +71,8 @@ Statement prepare(Connection connection, Integer transactionTimeout)
                 throw e.getTargetException();
             }
         }
-```
 
-2. 对`StatementHandler`的`update`、`query`和`batch`进行拦截，记录日志
-
-```
-//在query/update/batch等方法中
+        //在query/update/batch等方法中
         long start = System.currentTimeMillis();
         String exception = null;
         Object result = null;
@@ -94,4 +112,14 @@ Statement prepare(Connection connection, Integer transactionTimeout)
             }
 
         }
-```
+    }
+
+    private Object proceed(Invocation invocation) throws Throwable {
+        try {
+            return invocation.proceed();
+        } catch (InvocationTargetException e) {
+            throw e.getTargetException();
+        }
+    }
+
+}
